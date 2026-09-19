@@ -24,21 +24,32 @@ Plus one rule that is not a step: on agent startup, test the live config
 and restore last-good if it is broken. That rule is what makes the agent
 safe to kill at any moment.
 
-## Current status: not started
+## Current status: A0–A4 done, A5 report path ships (API reader stubbed)
 
 The agent is the node half of the control plane's milestone M3. The two
 repos are developed against each other: `Lesserv-Cloud` serves this
 protocol from a local process on a single VPS first, so everything here is
 testable without any Cloudflare involvement.
 
+Cross-repo proof lives in `tests/test_e2e_pull.py`: the real agent loop
+against a real local plane — enroll, convergence, user-edit propagation,
+test-stage rejection with live untouched, failed-start rollback to
+last-good, kill-mid-apply convergence, broken-live startup repair, stats
+report path, and auth failure. It launches `../Lesserv-Cloud` (or
+`$LESSERV_CLOUD_DIR`) and skips when the sibling checkout is absent, so
+agent CI stays hermetic. That E2E caught one real contract bug: the
+plane's first draft `304`'d the exact fetch the agent makes, so config
+fetch is now 200 on match/omitted and 409 with `desired_hash` on
+mismatch, with agent-side hash verification before touching disk.
+
 | # | Milestone | Status |
 |---|-----------|--------|
-| 0 | Skeleton: CLI, `agent.toml`, logging, state file | not started |
-| 1 | Client, enroll, heartbeat (`bearer-v1`) | not started |
-| 2 | The apply pipeline (fetch, test, snapshot, swap, restart, rollback) | not started |
-| 3 | Reporting, offline behavior, startup verification | not started |
-| 4 | Packaging: systemd unit, installer, release artifact | not started |
-| 5 | Stats collection and reporting | not started |
+| 0 | Skeleton: CLI, `agent.toml`, logging, state file | done |
+| 1 | Client, enroll, heartbeat (`bearer-v1`) | done |
+| 2 | The apply pipeline (fetch, test, snapshot, swap, restart, rollback) | done |
+| 3 | Reporting, offline behavior, startup verification | done |
+| 4 | Packaging: systemd unit, installer, release artifact | done |
+| 5 | Stats collection and reporting | partial (absolute + boot_id report path ships; live Xray API reader stubbed) |
 | — | `hmac-v1` request signing | later |
 | — | Self-update from the control plane | later |
 | — | `restart_mode: "docker"` (Xray in a container) | later |

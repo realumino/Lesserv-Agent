@@ -1,0 +1,19 @@
+[Unit]
+Description=Lesserv node agent (Xray config reconciler)
+Documentation=https://github.com/realumino/Lesserv-Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m lesserv_agent run
+Restart=on-failure
+RestartSec=5
+User=root
+Group=root
+# Config holds the node token (mode 0600); state holds applied hash.
+ReadWritePaths=/etc/lesserv /var/lib/lesserv
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

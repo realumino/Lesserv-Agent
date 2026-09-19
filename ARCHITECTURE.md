@@ -54,9 +54,12 @@ through it is the same path.
 failed last apply matters even when the hashes match: it means the node is
 supposed to be running something it is not.
 
-**2. Fetch.** Request the config for that hash. A `304` means the node was
-already current and something else was wrong; anything that is not a
-complete, well-formed config is treated as a network failure.
+**2. Fetch.** Request the config for that hash. A `409` means the plane
+moved on between heartbeat and fetch, so the loop re-heartbeats instead
+of applying bytes it did not ask for; the returned hash is verified
+against the requested one for the same reason. Anything that is not a
+complete, well-formed config for the requested hash is treated as a
+network failure.
 
 **3. Test.** Write the config to a temporary file and run Xray's own
 config test against it. Xray is the authority on whether a config is valid
@@ -92,8 +95,10 @@ can persist across a restart.
 
 ```
 /etc/lesserv/agent.toml          cp_url, node_id, token, poll_interval,
-                                 xray_binary, config_path, restart_mode
-/var/lib/lesserv/state.json      applied_hash, last_apply_ok, last_error
+                                 xray_binary, config_path, restart_mode,
+                                 xray_service, stats_interval, auth
+/var/lib/lesserv/state.json      applied_hash, applied_at, last_apply_ok,
+                                 last_error, xray_boot_id
 /var/lib/lesserv/config.json     what Xray is running now
 /var/lib/lesserv/config.last_good  the last config that started successfully
 ```
@@ -102,9 +107,10 @@ can persist across a restart.
 and the only thing it contains that matters is the token.
 
 `state.json` is written atomically and is deliberately minimal: the hash
-the node believes it is running, whether the last apply worked, and the
-last error. Everything else can be recomputed from the plane or from the
-config on disk.
+the node believes it is running, when it applied it (`applied_at`), whether
+the last apply worked, the last error, and the current Xray boot id (minted
+fresh on every verified start so stats resets stay explicable). Everything
+else can be recomputed from the plane or from the config on disk.
 
 `config.last_good` is the safety net. It is the reason a failed apply is an
 inconvenience rather than an outage.
