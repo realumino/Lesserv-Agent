@@ -12,6 +12,7 @@ this box has neither Xray nor systemd, and that seam is the agent's
 own unit-tested surface. Everything on the wire is real.
 """
 
+import base64
 import json
 import os
 import shutil
@@ -32,7 +33,7 @@ from lesserv_agent import stats as stats_mod
 from lesserv_agent import xray
 
 NODE_ID = "e2e01"
-BOOT_TIMEOUT_S = 60
+BOOT_TIMEOUT_S = 120
 
 
 def _cloud_dir():
@@ -40,32 +41,27 @@ def _cloud_dir():
 
     WHAT: Prefer $LESSERV_CLOUD_DIR, else ../Lesserv-Cloud.
     WHY: The two repos are siblings on a dev box; CI without the
-    sibling must skip, not fail.
+    sibling must skip, not fail. The sentinel is the Worker entrypoint
+    (the plane runs only under workerd; there is no uvicorn entrypoint).
     """
     env = os.environ.get("LESSERV_CLOUD_DIR")
-    if env and os.path.isfile(os.path.join(env, "src", "local.py")):
+    if env and os.path.isfile(os.path.join(env, "src", "worker.py")):
         return env
     here = os.path.dirname(os.path.abspath(__file__))
     cand = os.path.normpath(os.path.join(here, "..", "..", "Lesserv-Cloud"))
-    if os.path.isfile(os.path.join(cand, "src", "local.py")):
+    if os.path.isfile(os.path.join(cand, "src", "worker.py")):
         return cand
     return None
 
 
-def _plane_python(cloud):
-    """Return the interpreter that has the plane's deps, or None.
+def _find_uv():
+    """Return the uv executable from PATH, or None.
 
-    WHAT: The cloud venv python (uvicorn + fastapi live there).
-    WHY: The agent itself is stdlib-only; the plane is not. Reusing
-    its venv avoids installing anything.
+    WHAT: `uv` is what launches the plane (pywrangler dev).
+    WHY: the plane's own dev loop is `uv run pywrangler dev`; CI without
+    uv must skip, not fail.
     """
-    if os.name == "nt":
-        cand = os.path.join(cloud, ".venv", "Scripts", "python.exe")
-    else:
-        cand = os.path.join(cloud, ".venv", "bin", "python")
-    if os.path.isfile(cand):
-        return cand
-    return None
+    return shutil.which("uv")
 
 
 def _free_port():
@@ -81,6 +77,47 @@ def _free_port():
         return sock.getsockname()[1]
     finally:
         sock.close()
+
+
+def _kill_tree(pid):
+    """Terminate a spawned process and everything it launched.
+
+    WHY not terminate(): the plane is uv -> node -> workerd, and killing
+    uv alone orphans the runtime; the whole tree must die before the
+    throwaway directory is removed.
+    """
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                       capture_output=True)
+    else:
+        import signal
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+
+
+def _start_plane(cloud, root, port, log):
+    """Launch the plane under `uv run pywrangler dev` and return the Popen.
+
+    WHAT: Apply the schema to a throwaway D1 directory first (migrations
+    are wrangler's job, not the app's), then boot workerd bound to it.
+    The --var supplies REALITY_KEY_SECRET so key sealing works without
+    the cloud checkout's own .dev.vars.
+    WHY workerd and not a CPython server: the plane runs only under
+    workerd — testing against anything else would test a runtime that
+    does not exist.
+    """
+    persist = os.path.join(root, "plane-state")
+    apply_ = subprocess.run(
+        ["uv", "run", "pywrangler", "d1", "migrations", "apply", "lesserv",
+         "--local", "--persist-to", persist],
+        cwd=cloud, capture_output=True, text=True, timeout=180)
+    if apply_.returncode != 0:
+        raise AssertionError("migrations apply failed: "
+                             + (apply_.stderr or apply_.stdout)[-1500:])
+    secret = base64.b64encode(os.urandom(32)).decode()
+    return subprocess.Popen(
+        ["uv", "run", "pywrangler", "dev", "--port", str(port),
+         "--persist-to", persist, "--var", "REALITY_KEY_SECRET:" + secret],
+        cwd=cloud, stdout=log, stderr=subprocess.STDOUT)
 
 
 def _http(base, method, path, body=None):
@@ -132,23 +169,14 @@ class TestE2EPull(unittest.TestCase):
         cloud = _cloud_dir()
         if not cloud:
             raise unittest.SkipTest("no Lesserv-Cloud sibling checkout")
-        py = _plane_python(cloud)
-        if not py:
-            raise unittest.SkipTest("no plane interpreter (cloud .venv)")
-        probe = subprocess.run([py, "-m", "uvicorn", "--version"],
-                               capture_output=True, timeout=60)
-        if probe.returncode != 0:
-            raise unittest.SkipTest("uvicorn missing from cloud .venv")
+        if not _find_uv():
+            raise unittest.SkipTest("no uv on PATH (needed to launch the plane)")
         cls.root = tempfile.mkdtemp(prefix="lesserv-e2e-")
         cls.port = _free_port()
         cls.base = "http://127.0.0.1:%d" % cls.port
         log_path = os.path.join(cls.root, "plane.log")
         cls.log = open(log_path, "wb")
-        cls.plane = subprocess.Popen(
-            [py, "-m", "uvicorn", "local:app",
-             "--app-dir", os.path.join(cloud, "src"),
-             "--host", "127.0.0.1", "--port", str(cls.port)],
-            cwd=cls.root, stdout=cls.log, stderr=subprocess.STDOUT)
+        cls.plane = _start_plane(cloud, cls.root, cls.port, cls.log)
         try:
             cls._wait_for_plane()
             cls.token = cls._seed()
@@ -204,11 +232,7 @@ class TestE2EPull(unittest.TestCase):
     def tearDownClass(cls):
         try:
             if getattr(cls, "plane", None) and cls.plane.poll() is None:
-                cls.plane.terminate()
-                try:
-                    cls.plane.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    cls.plane.kill()
+                _kill_tree(cls.plane.pid)
         finally:
             try:
                 cls.log.close()
